@@ -13,7 +13,8 @@ The runnable workflow is deliberately safe: `mock` is the only adapter that can 
 - Idempotency fingerprinting and in-process concurrent-request coordination.
 - Bounded retries only for known pre-acceptance transient failures; no retry after an ambiguous timeout.
 - Structured per-order results, partial-failure reporting, execution UUIDs, and console completion notifications.
-- Docker/Compose, FastAPI OpenAPI docs, and 23 behavior-focused tests.
+- Single-page vanilla HTML/CSS/JS frontend dashboard (`index.html`) to visually demo portfolio upload, broker connection, single-click execution, and order results.
+- Docker/Compose, FastAPI OpenAPI docs, and 25 behavior-focused tests.
 
 ## Architecture
 
@@ -44,9 +45,33 @@ app/
   notifications/   completion notification boundary
   repositories/    in-memory idempotency coordination
   services/        execution and retry workflow
+index.html         Single-page visual frontend dashboard
+styles.css         Vanilla CSS stylesheet
+app.js             Vanilla JS frontend API integration & DOM logic
 tests/             FastAPI and service behavior tests
 docs/              Problem 2 design and Mermaid architecture diagram
 ```
+
+## Frontend Dashboard (Bonus UI)
+
+A zero-dependency, single-page Vanilla HTML/CSS/JS frontend dashboard (`index.html`) is provided to visually test the execution flow:
+
+1. **Upload Target Portfolio**: Supports `.csv` or `.json` file upload and displays an interactive target portfolio breakdown table.
+2. **Connect Broker**: Connects to the mock broker or named broker scaffolds (Zerodha, FYERS, AngelOne, Groww, Upstox).
+3. **Review & Execute Trades**: Compares current position state against target portfolio, calculates order deltas, allows toggling between `REBALANCE` and `FIRST_TIME` modes, and triggers single-click trade execution.
+4. **View Results & Order Status**: Real-time status breakdown, execution UUID tracking, success/failure metrics, and normalized order status logs.
+
+### Step-by-Step UI User Testing Flow
+
+1. **Start Backend Server**:
+   ```bash
+   uvicorn app.main:app --reload --port 8000
+   ```
+2. **Open Dashboard**: Double-click `index.html` or open `http://localhost:8000` in your web browser. You will see a green banner indicating backend connection.
+3. **Step 1 (Upload Portfolio)**: A default sample portfolio (`RELIANCE`, `INFY`, `TCS`, `HDFCBANK`) is pre-loaded. Optionally upload a custom CSV/JSON file using **Upload Portfolio**.
+4. **Step 2 (Connect Broker)**: Select **Mock Broker (Runnable Demo)** or any broker adapter and click **Connect Broker**.
+5. **Step 3 (Review & Execute)**: Choose execution type (`REBALANCE` or `FIRST_TIME`) and click **⚡ Execute Trades (Single-Click)**.
+6. **Step 4 (View Results)**: Scroll to order results to view execution UUID, normalized status (`ACCEPTED`), and per-order attempts. Re-clicking **Execute Trades** demonstrates idempotency replay. No build steps, `npm`, or bundlers required.
 
 ## Broker adapter status
 

@@ -1,37 +1,136 @@
 # Multi-Frequency Financial Data Platform
 
-## Q1 - Storage and point-in-time correctness
+## Short Answer & Core Value Proposition
 
-The platform separates hot serving data from durable history. Kafka (or Redpanda for a simpler Kafka-compatible footprint) is the durable event boundary for normalized ticks, EOD arrivals, and fundamentals. A partition key of exchange plus symbol preserves per-instrument order while allowing the 5,000-plus-symbol universe to scale horizontally.
+This design solves the **temporal join & look-ahead bias problem** for 5,000+ NSE/BSE symbols across tick, daily (EOD), quarterly, and annual frequencies.
 
-Ticks and daily prices go to ClickHouse. Its columnar storage, sparse indexes, partitioning, and compression make time-range scans and aggregations practical at much lower cost than a row store. Tick tables are partitioned by trading date and ordered by symbol, event time; EOD tables are ordered by symbol and date. Materialized views create 1-minute, 5-minute, hourly, and daily OHLCV rollups. Raw tick retention is intentionally finite in ClickHouse (for example, 30-90 days depending on cost), while rollups remain for the research retention window.
+It separates **live low-latency serving** from **point-in-time correct historical research**:
+- **Live Use Case**: Serves latest price, valid EPS snapshot, live P/E, yield, and momentum in `<200ms` without waiting for historical joins.
+- **Historical Use Case**: Joins historical price with the exact EPS available to the market at that timestamp (`available_at <= market_timestamp`), avoiding look-ahead bias (e.g. using today's EPS for a 2022 price point).
 
-PostgreSQL stores instrument metadata and versioned quarterly/annual fundamentals because those records are relational, comparatively small, and need transactional upserts, constraints, and audit history. Redis stores the latest live price and derived metrics with a short TTL. S3-compatible object storage stores immutable raw events and compressed Parquet partitions for long-term archive and replay. Parquet with ZSTD compression, partitioned by dataset/exchange/date, is cheaper than retaining every tick in a hot database. A lifecycle policy can move raw data to infrequent storage and eventually cold storage.
+---
 
-Petabyte-scale growth is controlled through retention tiers: keep recent raw ticks hot, keep multi-year bars and EOD prices queryable, and archive older raw ticks. Rebuildable rollups are not treated as the only source of truth; the immutable object archive remains the recovery source. Compaction and symbol/date partition sizing prevent small-file explosions.
+## Architecture Diagram
 
-Point-in-time correctness is modeled explicitly. A fundamental row contains `symbol`, `period_end`, `released_at`, `available_at`, `ingested_at`, `version`, and values such as `eps_ttm`, revenue, book value, and dividend. `available_at` is the timestamp at which a consumer could have known the value, normally the release timestamp plus any controlled ingestion delay. A correction creates a new version rather than overwriting history. Fiscal period alone is insufficient: two versions can both describe the quarter ended 31 December, while only the later restatement was knowable on a later date.
+```mermaid
+flowchart LR
+    B[Broker WebSocket / EOD / Fundamentals] --> N[Normalizer & Validator]
+    N --> K[Kafka / Redpanda Event Bus]
 
-For a calculation at timestamp `t`, the as-of join chooses the latest fundamental for the relevant period where `available_at <= t`, ordered by `available_at` and `version`. Therefore, Q3 results released at 7 PM Tuesday cannot appear in a 6 PM Tuesday calculation. For example, a 2023-02-07 15:30 IST P/E point uses the previous available EPS; the same stock at 19:01 IST may use the just-released Q3 EPS. Using today's EPS with a 2022 price would leak future information and create look-ahead bias, overstating historical strategy quality.
+    subgraph Storage_Tier ["Storage Tier"]
+        K --> T_CONS[Tick Consumer] --> CH[(ClickHouse: Ticks & EOD)]
+        K --> F_CONS[Fundamental Consumer] --> PG[(PostgreSQL: Versioned Fundamentals)]
+        K --> S3_STORE[(S3 / Parquet Storage Archive)]
+    end
 
-## Q2 - Compute engine
+    subgraph Live_Serving ["Live Serving Tier (<200ms)"]
+        T_CONS --> L_WORKER[1s Coalesced Metric Worker]
+        F_CONS --> L_WORKER
+        L_WORKER --> REDIS[(Redis Snapshot Cache)]
+        REDIS --> LIVE_API[FastAPI Live Endpoint]
+        LIVE_API --> UI_LIVE[Live Dashboard / SSE Stream]
+    end
 
-This is an event-driven hybrid. A normalized tick updates the latest-price state and publishes a symbol-level metric invalidation. A live metric worker reads the current price and the latest available EPS, computes P/E, momentum, and yield, and writes a compact snapshot to Redis. Updates are coalesced per symbol over roughly one second; second-level UI freshness is sufficient and avoids calculating on every noisy tick.
+    subgraph Historical_Serving ["Historical Query & Research Tier"]
+        CH --> H_QUERY[Historical Query Engine]
+        PG --> H_QUERY
+        H_QUERY --> ASOF[Point-in-Time As-Of Join]
+        ASOF --> H_CACHE[(Redis Revisioned Cache)]
+        H_CACHE --> HIST_API[FastAPI Chart Endpoint]
+        HIST_API --> UI_HIST[5-Year Chart UI]
+    end
 
-When a new EPS or balance-sheet version arrives, a fundamentals event invalidates affected live symbols and marks historical metric partitions stale. The worker recomputes live P/E using `price / point-in-time EPS`; it never replaces a historical EPS retrospectively. Scheduled jobs calculate heavier rolling momentum, backfill missing bars, and materialize common research windows. A historical request is computed on read when absent from cache, using a temporal/as-of join between EOD prices and versioned fundamentals, then cached.
+    S3_STORE --> REPLAY[Replay & Backfill Jobs] --> CH & PG
+```
 
-New tick flow is: validate and normalize event, append to Kafka, persist to ClickHouse, update the Redis latest-price key, coalesce a metric recomputation, and publish a UI update. New fundamentals flow is: validate the release metadata, append the immutable event, transactionally insert a new PostgreSQL version, invalidate live keys, and enqueue historical recomputation. A historical request reads ClickHouse and PostgreSQL through a query service, joins by symbol/date and `available_at`, and returns a bounded time series.
+---
 
-## Q3 - APIs and caching
+## Q1: Storage Architecture & Point-in-Time Correctness
 
-The live API is a horizontally scalable FastAPI service. `GET /v1/stocks/{symbol}/metrics` reads a Redis hash containing price, EPS version, P/E, momentum, yield, and `computed_at`; a cache miss falls back to the latest materialized snapshot or computes synchronously with a strict timeout. The target is under 200 ms at the API boundary. Redis keys are versioned by symbol and metric schema, have a short TTL (for example 5-15 seconds), and are actively invalidated by tick/fundamental events. WebSocket or Server-Sent Events can push changes, while REST remains the reliable initial-load path.
+### Proposed Storage Stack
 
-The historical API accepts symbol, date range, frequency, and metric version. Its cache key includes all query parameters and the data revision, for example `pe:v3:RELIANCE:2022-10-01:2025-10-01:daily`. A three-year request (about 750 trading-day points) scans ClickHouse EOD rows, then applies a temporal/as-of join to the PostgreSQL fundamental history. For each EOD date, it selects the latest EPS that was available by that market timestamp, calculates `adjusted_close / eps_ttm`, and returns the ordered series. Results are cached for minutes to hours because historical data changes less often. A new EOD correction or fundamental version publishes an affected-symbol revision event; that revision is included in future keys and selective invalidation removes old keys. The API caps point count and uses downsampling for charts without changing the underlying research data.
+| Data Frequency | Proposed Storage Technology | Table Schema & Ordering Strategy | Key Purpose & Assessment |
+| :--- | :--- | :--- | :--- |
+| **Tick & EOD Prices** | **ClickHouse** | `PARTITION BY trading_date`<br>`ORDER BY (symbol, event_time)` | High-throughput columnar store for fast time-series analytical scans & aggregations. |
+| **Fundamentals** | **PostgreSQL** | `versioned_fundamentals`<br>`(symbol, period_end, available_at, version)` | Relational metadata with ACID guarantees, constraints, and point-in-time versioning. |
+| **Latest Live Snapshot** | **Redis** | `HSET live:metrics:{symbol}` | Low-latency serving key-value store for `<200ms` API responses. |
+| **Raw Archive & Replay** | **S3-compatible Storage (Parquet)** | `s3://archive/{dataset}/{year}/{month}/` | Immutable long-term retention & offline backfill replay with ZSTD compression. |
+| **Event Stream** | **Kafka / Redpanda** | Partition Key: `exchange:symbol` | Scalable event bus ensuring per-symbol sequential ordering. |
 
-## Q4 - Full architecture
+---
 
-The diagram in `docs/architecture.mmd` traces both serving paths. A raw WebSocket tick flows through Kafka and normalization into ClickHouse and the live metric updater; the updater writes Redis and the API serves the live UI. This avoids a raw-tick scan or temporal join on a live request, which is why the under-200 ms target is realistic. A raw EOD price is persisted to ClickHouse and archived to S3/Parquet. A historical query joins that EOD series to versioned fundamentals in PostgreSQL using `available_at`, then serves a five-year P/E chart through the historical cache.
+### Data Retention & Archival Strategy
 
-Operationally, consumer lag, rejected events, stale live keys, query latency, and cache hit rate are monitored. Dead-letter topics preserve malformed broker events. Backfills are isolated from live consumers and are idempotent by event ID and dataset revision. The design uses a few specialized components because each addresses a concrete trade-off: Kafka for replayable fan-out, ClickHouse for compressed analytical scans, PostgreSQL for correctness of slowly changing facts, Redis for sub-200 ms reads, and object storage for cheap retention.
+| Data Tier / Age | Storage Location | Resolution & Formatting | Primary Use Case |
+| :--- | :--- | :--- | :--- |
+| **0 – 90 Days** | ClickHouse (Hot analytical tier) | Raw Ticks & EOD prices | Microstructure research, slippage analysis, live metrics. |
+| **90 Days – 2 Years** | Compressed Parquet in Object Storage | Raw Ticks (ZSTD compressed) | Tick-level volatility studies & order-book reconstruction. |
+| **Multiple Years** | ClickHouse (Materialized Views) | 1-minute & 5-minute bars | Multi-year intraday charting & factor calculations. |
+| **Full History (5+ Years)** | ClickHouse & Parquet Archive | Daily OHLCV & Corporate-Adjusted Prices | 5-Year P/E historical charting & backtesting. |
 
-Deployment is split by workload rather than by arbitrary microservice boundaries. Stateless API replicas scale on request rate, stream consumers scale on Kafka partitions, and historical query workers scale on scan concurrency. Every event carries an exchange timestamp, ingestion timestamp, source event ID, and schema version so clock skew and late delivery are observable. A reconciliation job compares broker/EOD counts with stored counts, while a replay job can rebuild a date range from the object archive into a new table version. This gives operators a safe way to correct data without mutating the version used by an in-flight historical calculation.
+---
+
+### Point-in-Time Correctness & Versioning Semantics
+
+To eliminate look-ahead bias, fundamental updates introduce explicit version semantics:
+
+- **`released_at`**: Exact timestamp when company publicly publishes earnings.
+- **`available_at`**: Timestamp when data is ingested & usable for trading decision (e.g. after-market releases become available for next session).
+- **`supersedes_version`**: Explicit pointer to the earlier version replaced by restatement/correction.
+- **`is_restatement`**: Boolean flag marking corrections without altering historically knowable data.
+
+```sql
+-- Conceptual Point-in-Time Historical Join Query
+SELECT p.symbol, p.date, p.close_price, f.eps_ttm,
+       (p.close_price / NULLIF(f.eps_ttm, 0)) AS pe_ratio
+FROM eod_prices p
+ASOF LEFT JOIN versioned_fundamentals f
+  ON p.symbol = f.symbol
+ AND f.available_at <= p.market_timestamp
+ORDER BY p.date ASC;
+```
+
+---
+
+## Q2: Compute Engine Strategy (Derived Metrics)
+
+### Computation Matrix by Metric Type
+
+| Metric / Computation | Recommended Approach | Coalescing / Trigger Details |
+| :--- | :--- | :--- |
+| **Current Price** | On-write / On-tick arrival | Update latest Redis price state immediately. |
+| **Live P/E Ratio** | Event-driven (Coalesced 1 second) | Debounced per symbol over 1-second window to prevent tick noise work. |
+| **Live Dividend Yield** | Event-driven | Triggered on price change or fundamental dividend version update. |
+| **Historical P/E** | On-read (Cached) | Computed via `ASOF JOIN` between ClickHouse EOD and PostgreSQL fundamentals. |
+| **Rolling Momentum** | Scheduled batch / Incremental | Materialized hourly/daily for fast API lookups. |
+| **Restatement Backfills** | Scheduled versioned batch | Recomputes derived historical metric partitions without rewriting past `available_at` states. |
+
+---
+
+### Live P/E Definition & Edge Case Rules
+
+- **Metric Standard**: `pe_ttm_adjusted_consolidated = latest_price / latest_available_eps_ttm`
+- **Zero EPS (`EPS = 0`)**: P/E is **Undefined** (`NULL`).
+- **Negative EPS (`EPS < 0`)**: Returns **`NM`** ("Not Meaningful") instead of misleading negative multiples.
+- **Missing Data**: Returns `NULL` with reason code `MISSING_FUNDAMENTALS`.
+- **Targeted Invalidation**: When RELIANCE issues Q3 earnings, invalidate **only** `live:metrics:RELIANCE` key to avoid fundamental invalidation storms across unrelated symbols.
+
+---
+
+## Q3: APIs & Low-Latency Serving (<200ms)
+
+### Serving Patterns & Caching Architecture
+
+| Request Pattern | Endpoint & Method | Serving Path & Caching Strategy | Target Latency |
+| :--- | :--- | :--- | :--- |
+| **Pattern A: Live Dashboard** | `GET /v1/stocks/{symbol}/metrics`<br>`SSE /v1/stocks/{symbol}/stream` | Direct read from **Redis Hash**. Fallback to secondary materialized snapshot with freshness timestamp. | `<50ms` (Target `<200ms`) |
+| **Pattern B: Historical Chart** | `GET /v1/stocks/{symbol}/chart/pe`<br>`?start=2021-10-01&end=2026-10-01` | Query service executes ClickHouse + PostgreSQL `ASOF` join. Cached with revision key: `pe:v3:{symbol}:{revision}:{range}` | `<150ms` (Cached) |
+
+---
+
+## Q4: Operational Awareness & Data Integrity
+
+- **Idempotency & Deduplication**: Kafka event consumer uses `(exchange, symbol, event_id)` deduplication keys to prevent duplicate tick processing.
+- **Clock Skew & Session Alignment**: Converts all timestamps to **UTC**, retaining exchange market-session metadata (NSE IST timezone). After-market releases (e.g. 7 PM IST) map to the next trading session opening time.
+- **Dead-Letter Queue (DLQ)**: Malformed broker socket ticks or irregular filings divert to DLQ for manual audit without blocking streaming consumers.
+- **Reconciliation Engine**: Daily EOD reconciliation script compares broker exchange trade totals against stored ClickHouse row counts.

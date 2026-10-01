@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Portfolio Trade Execution Engine</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-container">
+      <h1>⚡ Kalpi Portfolio Trade Execution Engine</h1>
+      <span class="badge">FastAPI Dashboard</span>
+    </div>
+  </header>
+
+  <main class="main-container">
+    <!-- Progress Stepper -->
+    <nav class="stepper">
+      <div class="step active" id="step-nav-1">
+        <span class="step-num">1</span> Upload Target Portfolio
+      </div>
+      <div class="step" id="step-nav-2">
+        <span class="step-num">2</span> Connect Broker
+      </div>
+      <div class="step" id="step-nav-3">
+        <span class="step-num">3</span> Review & Execute Trades
+      </div>
+      <div class="step" id="step-nav-4">
+        <span class="step-num">4</span> View Results
+      </div>
+    </nav>
+
+    <!-- Global Notification Banner -->
+    <div id="status-banner" class="banner hidden"></div>
+
+    <!-- Section 1: Upload Target Portfolio -->
+    <section id="section-upload" class="card">
+      <h2>Step 1: Upload Target Portfolio</h2>
+      <p class="section-desc">Upload your desired portfolio target state in CSV or JSON format.</p>
+      
+      <div class="upload-box">
+        <input type="file" id="portfolio-file" accept=".csv,.json">
+        <button id="btn-upload" class="btn btn-primary">Upload Portfolio</button>
+      </div>
+      
+      <div id="upload-feedback" class="feedback"></div>
+
+      <div id="target-portfolio-container" class="table-container hidden">
+        <h3>Target Portfolio Breakdown</h3>
+        <table class="data-table" id="table-target-portfolio">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Target Quantity</th>
+              <th>Side / Action</th>
+              <th>Order Type</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Section 2: Connect Broker -->
+    <section id="section-broker" class="card">
+      <h2>Step 2: Connect Broker</h2>
+      <p class="section-desc">Select an Indian stock broker adapter to authenticate with.</p>
+
+      <div class="broker-controls">
+        <label for="broker-select">Select Broker Adapter:</label>
+        <select id="broker-select" class="form-control">
+          <option value="">-- Choose Broker --</option>
+          <option value="mock" selected>Mock Broker (Runnable Demo)</option>
+          <option value="zerodha">Zerodha (Kite Connect)</option>
+          <option value="fyers">Fyers (API v3)</option>
+          <option value="angelone">AngelOne (SmartAPI)</option>
+          <option value="groww">Groww</option>
+          <option value="upstox">Upstox (v3)</option>
+        </select>
+        
+        <button id="btn-connect-broker" class="btn btn-primary">Connect Broker</button>
+        <button id="btn-disconnect-broker" class="btn btn-outline hidden">Disconnect</button>
+      </div>
+
+      <div id="broker-status-card" class="info-box hidden">
+        <div class="info-row">
+          <strong>Broker Connection Status:</strong>
+          <span id="broker-status-text" class="status-badge success">Connected</span>
+        </div>
+        <div class="info-row">
+          <strong>Integration Mode:</strong>
+          <span id="broker-mode-text">Mock In-Memory Engine</span>
+        </div>
+        <div class="info-row">
+          <strong>User ID:</strong>
+          <span id="broker-user-text">demo_trader_123</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 3: Review & Execute Trades -->
+    <section id="section-execute" class="card">
+      <h2>Step 3: Review & Execute Trades</h2>
+      <p class="section-desc">Review position deltas and explicit order instructions before firing single-click execution.</p>
+
+      <div class="execution-options">
+        <label>Execution Mode:</label>
+        <label class="radio-label">
+          <input type="radio" name="execution_type" value="REBALANCE" checked> REBALANCE (BUY / SELL / ADJUST)
+        </label>
+        <label class="radio-label">
+          <input type="radio" name="execution_type" value="FIRST_TIME"> FIRST_TIME (BUY Only)
+        </label>
+      </div>
+
+      <div id="comparison-container" class="table-container">
+        <h3>Proposed Trade Instructions</h3>
+        <table class="data-table" id="table-comparison">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Current Quantity</th>
+              <th>Target Quantity</th>
+              <th>Difference</th>
+              <th>Side / Action</th>
+              <th>Order Quantity</th>
+              <th>Order Type</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td colspan="7" class="empty-msg">No portfolio uploaded yet. Please upload a CSV/JSON portfolio above or use sample payload.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="action-bar">
+        <button id="btn-execute" class="btn btn-success btn-lg">⚡ Execute Trades (Single-Click)</button>
+        <div id="execute-spinner" class="spinner hidden">Executing orders via backend...</div>
+      </div>
+    </section>
+
+    <!-- Section 4: View Results / Order Status -->
+    <section id="section-results" class="card">
+      <div class="section-header">
+        <h2>Step 4: Execution Results & Order Status</h2>
+      </div>
+      <p class="section-desc">Real-time normalized broker responses, idempotency validation, and execution counts.</p>
+
+      <!-- Stats Grid -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-title">Execution ID</div>
+          <div class="stat-value small" id="stat-execution-id">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-title">Overall Status</div>
+          <div class="stat-value" id="stat-overall-status">--</div>
+        </div>
+        <div class="stat-card success">
+          <div class="stat-title">Successful Orders</div>
+          <div class="stat-value" id="stat-success-count">0</div>
+        </div>
+        <div class="stat-card danger">
+          <div class="stat-title">Failed / Rejected</div>
+          <div class="stat-value" id="stat-failed-count">0</div>
+        </div>
+      </div>
+
+      <!-- Results Table -->
+      <div class="table-container">
+        <h3>Broker Orders Log</h3>
+        <table class="data-table" id="table-results">
+          <thead>
+            <tr>
+              <th>Client Order ID</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Quantity</th>
+              <th>Status</th>
+              <th>Broker Order ID</th>
+              <th>Attempts</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td colspan="8" class="empty-msg">No trades executed yet. Click "Execute Trades" above.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <p>Kalpi Portfolio Trade Execution Engine &bull; Vanilla JS Frontend</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

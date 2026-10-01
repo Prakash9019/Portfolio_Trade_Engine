@@ -33,6 +33,14 @@ def create_app(
     application.state.broker_registry = broker_registry or BrokerRegistry(mock_fail_symbols=mock_fail_symbols)
     application.state.execution_repository = execution_repository or ExecutionRepository()
     application.state.notification_service = notification_service or NotificationService()
+    from fastapi.middleware.cors import CORSMiddleware
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     application.include_router(router)
     application.include_router(compatibility_router)
     return application
