@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    ports:
+      - "${KALPI_HOST_PORT:-8000}:8000"
+    environment:
+      KALPI_ENVIRONMENT: local
+      KALPI_LIVE_TRADING_ENABLED: "false"
+      KALPI_RETRY_ATTEMPTS: "3"
+      KALPI_IDEMPOTENCY_WAIT_SECONDS: "30"
+      KALPI_MOCK_FAIL_SYMBOLS: "${KALPI_MOCK_FAIL_SYMBOLS:-}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 3s

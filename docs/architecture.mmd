@@ -1,0 +1,26 @@
+flowchart LR
+  TICK[Raw broker WebSocket tick] --> STREAM[Kafka / Redpanda]
+  STREAM --> NORM[Schema validation and stream normalizer]
+  NORM --> CH[(ClickHouse raw ticks and EOD)]
+  NORM --> LIVE[Coalesced live metric worker]
+  LIVE --> REDIS[(Redis latest price and derived metrics)]
+  REDIS --> LIVE_API[FastAPI live metrics API under 200 ms]
+  LIVE_API --> UI[Live stock UI]
+
+  EOD[Raw market-close EOD price] --> CH
+  EOD --> ARCHIVE[(S3 / Parquet immutable archive)]
+  FUND[Quarterly EPS and annual balance-sheet release] --> FUND_INGEST[Fundamentals validator and versioner]
+  FUND_INGEST --> PG[(PostgreSQL versioned fundamentals)]
+  FUND_INGEST --> STREAM
+
+  CH --> ASOF[Temporal as-of join: available_at <= price timestamp]
+  PG --> ASOF
+  ASOF --> HIST[Historical P/E query and downsampling]
+  HIST --> HIST_CACHE[(Redis revisioned historical cache)]
+  HIST_CACHE --> HIST_API[FastAPI chart API]
+  HIST_API --> CHART[3-year / 5-year P/E chart]
+
+  ARCHIVE --> BACKFILL[Replay and backfill jobs]
+  BACKFILL --> CH
+  BACKFILL --> PG
+
